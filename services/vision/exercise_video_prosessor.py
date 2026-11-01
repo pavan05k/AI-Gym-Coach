@@ -1,5 +1,6 @@
 import os
 import threading
+from pathlib import Path
 
 import av
 import cv2
@@ -31,8 +32,12 @@ class VideoProcessorClass(VideoProcessorBase):
         self._latest_metrics = None
         self._exercise_type = "Squats"
 
-        model_path = os.path.join(os.getcwd(), "ml_models", "pose_landmarker_full.task") 
-        base_option = python.BaseOptions(model_asset_path=model_path)
+        project_root = Path(__file__).resolve().parents[2]
+        model_path = project_root / "ml_models" / "pose_landmarker_full.task"
+        if not model_path.is_file():
+            raise FileNotFoundError(f"Pose model not found: {model_path}")
+
+        base_option = python.BaseOptions(model_asset_path=str(model_path))
 
         options = vision.PoseLandmarkerOptions(
             base_options=base_option,
