@@ -1,0 +1,272 @@
+import os
+import threading
+from pathlib import Path
+
+import av
+import cv2
+import mediapipe as mp
+import numpy as np
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+from streamlit_webrtc import VideoProcessorBase
+
+from detectors.biceps_curl import BicepsCurlDetector
+from detectors.lunges import LungesDetector
+from detectors.pushup import PushUpDetector
+from detectors.shoulder_press import ShoulderPressDetector
+from detectors.squat import SquatDetector
+
+# MediaPipe pose skeleton connections
+POSE_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 7), (0, 4), (4, 5), (5, 6), (6, 8), (9, 10), (11, 12),
+    (11, 13), (13, 15), (15, 17), (15, 19), (15, 21), (17, 19), (12, 14), (14, 16),
+    (16, 18), (16, 20), (16, 22), (18, 20), (11, 23), (12, 24), (23, 24), (23, 25),
+    (24, 26), (25, 27), (26, 28), (27, 29), (28, 30), (29, 31), (30, 32), (27, 31),
+    (28, 32)
+]
+
+
+class VideoProcessorClass(VideoProcessorBase):
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._latest_metrics = None
+        self._exercise_type = "Squats"
+
+        project_root = Path(__file__).resolve().parents[2]
+        model_path = project_root / "ml_models" / "pose_landmarker_full.task"
+        if not model_path.is_file():
+            raise FileNotFoundError(f"Pose model not found: {model_path}")
+
+        base_option = python.BaseOptions(model_asset_path=str(model_path))
+
+        options = vision.PoseLandmarkerOptions(
+            base_options=base_option,
+            running_mode=vision.RunningMode.VIDEO,
+            min_pose_detection_confidence=0.5,
+            min_pose_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+            output_segmentation_masks=False
+        )
+
+        self._landmarker = vision.PoseLandmarker.create_from_options(options)
+
+        self._detectors = {
+            "Squats": SquatDetector(),
+            "Push-ups": PushUpDetector(),
+            "Biceps Curls (Dumbbell)": BicepsCurlDetector(),
+            "Shoulder Press": ShoulderPressDetector(),
+            "Lunges": LungesDetector(),
+        }
+
+        self._frame_timestamps_ms = 0
+    
+    def set_latest_metrics(self, metrics):
+        with self._lock:
+            self._latest_metrics = metrics.copy()
+
+    def get_latest_metrics(self):
+        with self._lock:
+            return None if self._latest_metrics is None else self._latest_metrics.copy()
+        
+    def set_exercise(self, exercise_type, reset=False):
+        """Select the active detector without discarding in-progress reps.
+
+        Streamlit reruns the script frequently while the camera is active.  This
+        method is called on each rerun, so resetting unconditionally here makes
+        every detector start at zero before it can count a full repetition.
+        """
+        with self._lock:
+            exercise_changed = self._exercise_type != exercise_type
+            self._exercise_type = exercise_type
+
+            # Reset only for a new workout or when the selected exercise changes.
+            detector = self._detectors.get(exercise_type)
+            if detector and (reset or exercise_changed):
+                detector.reset()
+                self._latest_metrics = None
+
+    def get_exercise(self):
+        with self._lock:
+            return self._exercise_type
+    
+    def reset_detector(self):
+        """Reset the current exercise detector"""
+        with self._lock:
+            detector = self._detectors.get(self._exercise_type)
+            if detector:
+                detector.reset()
+        
+    def _draw_skeleton(self, img, landmarks):
+        h, w = img.shape[:2]
+
+        for start_idx, end_idx in POSE_CONNECTIONS:
+            p1 = landmarks[start_idx]
+            p2 = landmarks[end_idx]
+
+            if p1.visibility > 0.3 and p2.visibility > 0.3:
+                cv2.line(
+                    img,
+                    (int(p1.x * w), int(p1.y * h)),
+                    (int(p2.x * w), int(p2.y * h)),
+                    (0, 255, 0),
+                    8
+                )
+        
+        for lm in landmarks:
+            if lm.visibility > 0.3:
+                cv2.circle(
+                    img, 
+                    (int(lm.x * w), int(lm.y * h)),
+                    8,
+                    (255, 0, 0),
+                    -1
+                )
+            
+    def _draw_no_pose_warnings(self, img):
+        cv2.putText(
+            img,
+            "NO POSE DETECTED",
+            (30, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+        cv2.putText(
+            img,
+            "PLEASE FACE THE CAMERA",
+            (30, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+    def _draw_overlays(self, img, metrics, ex_type):
+        if ex_type == "Squats":
+            self._draw_squats_overlays(img, metrics)
+        elif ex_type == "Push-ups":
+            self._draw_pushup_overlays(img, metrics)
+        elif ex_type == "Biceps Curls (Dumbbell)":
+            self._draw_curl_overlays(img, metrics)
+        elif ex_type == "Shoulder Press":
+            self._draw_press_overlays(img, metrics)
+        elif ex_type == "Lunges":
+            self._draw_lunge_overlays(img, metrics)
+
+
+    def _draw_squats_overlays(self, img, metrics):
+        h, _ = img.shape[:2]
+
+        cv2.putText(
+            img,
+            f"DEPTH: {metrics['depth_status']}",
+            (20, h - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2,
+        )
+    
+    def _draw_pushup_overlays(self, img, metrics):
+        h, _ = img.shape[:2]
+
+        cv2.putText(
+            img,
+            f"BODY: {metrics['body_alignment']} | HIP: {metrics['hip_status']}",
+            (20, h - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2,
+        )
+
+    def _draw_curl_overlays(self, img, metrics):
+        h, _ = img.shape[:2]
+
+        cv2.putText(
+            img,
+            f"SWING: {metrics['swing_status']}",
+            (20, h - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2,
+        )
+
+    def _draw_press_overlays(self, img, metrics):
+        h, _ = img.shape[:2]
+
+        cv2.putText(
+            img,
+            f"EXT: {metrics['extension_status']} | BACK: {metrics['back_arch_status']}",
+            (20, h - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2,
+        )
+
+    def _draw_lunge_overlays(self, img, metrics):
+        h, _ = img.shape[:2]
+
+        cv2.putText(
+            img,
+            f"BALANCE: {metrics['balance_status']}",
+            (20, h - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2,
+        )
+
+    def recv(self, frame):
+        image = np.asarray(
+            cv2.flip(frame.to_ndarray(format="bgr24"), 1),
+            dtype=np.uint8
+        )
+
+        # Convert BGR to RGB for MediaPipe detection
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=rgb_image
+        )
+        
+        # Work with BGR image for display (display uses BGR format)
+        display_image = image
+
+        self._frame_timestamps_ms += 30
+        result = self._landmarker.detect_for_video(mp_image, self._frame_timestamps_ms)
+
+        if result.pose_landmarks:
+            landmarks = result.pose_landmarks[0]
+
+            self._draw_skeleton(display_image, landmarks)
+
+            ex_type = self.get_exercise()
+
+            detector = self._detectors.get(ex_type)
+
+            if detector:
+                metrics = detector.process(landmarks)
+
+                metrics["pose_detected"] = True
+
+                self._draw_overlays(display_image, metrics, ex_type)
+
+                self.set_latest_metrics(metrics)
+        else:
+            self._draw_no_pose_warnings(display_image)
+            
+            with self._lock:
+                if self._latest_metrics is not None:
+                    self._latest_metrics["pose_detected"] = False
+                else:
+                    self._latest_metrics = {"pose_detected": False}
+
+        return av.VideoFrame.from_ndarray(display_image, format="bgr24")
+    
