@@ -1,5 +1,6 @@
 import os
 import time
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -43,6 +44,7 @@ PLAN_PRESETS = [
     ("4×12", 4, 12),
     ("5×5", 5, 5),
 ]
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def _apply_plan_preset(sets, reps):
@@ -200,8 +202,8 @@ def main():
         layout="centered"
     )
 
-    load_css(os.path.join(os.getcwd(), "static", "style.css"))
-    inject_local_font(os.path.join(os.getcwd(), "static", "AdobeClean.otf"), "AdobeClean")
+    load_css(str(PROJECT_ROOT / "static" / "style.css"))
+    inject_local_font(str(PROJECT_ROOT / "static" / "AdobeClean.otf"), "AdobeClean")
 
     init_db()
 
