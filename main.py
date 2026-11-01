@@ -47,6 +47,38 @@ PLAN_PRESETS = [
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
+def _secret_or_env(name):
+    value = os.environ.get(name)
+    if value:
+        return value
+
+    try:
+        return str(st.secrets.get(name, ""))
+    except (FileNotFoundError, KeyError, AttributeError):
+        return ""
+
+
+def _get_rtc_configuration():
+    ice_servers = [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+    ]
+
+    turn_url = _secret_or_env("TURN_SERVER_URL")
+    turn_username = _secret_or_env("TURN_SERVER_USERNAME")
+    turn_credential = _secret_or_env("TURN_SERVER_CREDENTIAL")
+
+    if turn_url and turn_username and turn_credential:
+        ice_servers.append(
+            {
+                "urls": [turn_url],
+                "username": turn_username,
+                "credential": turn_credential,
+            }
+        )
+
+    return {"iceServers": ice_servers}
+
+
 def _apply_plan_preset(sets, reps):
     st.session_state.plan_sets = int(sets)
     st.session_state.plan_reps = int(reps)
@@ -315,7 +347,7 @@ def main():
             key="exercise-analysis",
             mode=WebRtcMode.SENDRECV,
             video_processor_factory=VideoProcessorClass,
-            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+            rtc_configuration=_get_rtc_configuration(),
             media_stream_constraints={
                 "video": True,
                 "audio": False
